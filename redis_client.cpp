@@ -55,26 +55,40 @@ buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
     buf.insert(buf.end(), data, data + len);
 }
 
-const size_t k_max_msg = 32 << 20;  // likely larger than the kernel buffer
+const size_t k_max_msg = 4096;  // likely larger than the kernel buffer
 
-// the `query` function was simply splited into `send_req` and `read_res`.
-static int32_t send_req(int fd, const uint8_t *text, size_t len) {
+static int32_t send_req(int fd, std::vector<std::string> &cmd) {
+    uint32_t len = 4;
+
+    for(std::string &s : cmd){
+        len += s.size() + 4;
+    }
+
     if (len > k_max_msg) {
         return -1;
     }
 
-    std::vector<uint8_t> wbuf;
-    buf_append(wbuf, (const uint8_t *)&len, 4);
-    buf_append(wbuf, text, len);
-    return write_all(fd, wbuf.data(), wbuf.size());
+    uint8_t wbuf[len + 4];
+    memcpy(&wbuf[0], &len, 4);
+
+    uint32_t nstr = cmd.size();
+    memcpy(&wbuf[4], &nstr, 4);
+
+    size_t curr = 8;
+
+    for(std::string &s:cmd){
+        uint32_t c_len = s.size();
+        memcpy(&wbuf[curr], &c_len, 4);
+        memcpy(&wbuf[curr+4], s.data(), s.size());
+        curr += (s.size()+4);
+    }
+    return write_all(fd, wbuf, len+4);
 }
 
 static int32_t read_res(int fd) {
-    // 4 bytes header
-    std::vector<uint8_t> rbuf;
-    rbuf.resize(4);
+    uint8_t rbuf[4+k_max_msg];
     errno = 0;
-    int32_t err = read_full(fd, &rbuf[0], 4);
+    int32_t err = read_full(fd, rbuf, 4);
     if (err) {
         if (errno == 0) {
             msg("EOF");
@@ -85,14 +99,13 @@ static int32_t read_res(int fd) {
     }
 
     uint32_t len = 0;
-    memcpy(&len, rbuf.data(), 4);  // assume little endian
+    memcpy(&len, rbuf, 4);  // assume little endian
     if (len > k_max_msg) {
         msg("too long");
         return -1;
     }
 
     // reply body
-    rbuf.resize(4 + len);
     err = read_full(fd, &rbuf[4], len);
     if (err) {
         msg("read() error");
@@ -100,11 +113,19 @@ static int32_t read_res(int fd) {
     }
 
     // do something
-    printf("len:%u data:%.*s\n", len, len < 100 ? len : 100, &rbuf[4]);
+    uint32_t res_code = 0;
+    if(len<4){
+        msg("bad response");
+        return -1;
+    }
+
+    memcpy(&res_code, &rbuf[4], 4);
+    fprintf(stderr, "Server says: [%u] %.*s\n", res_code, len-4, &rbuf[8]);
+
     return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         die("socket()");
@@ -119,30 +140,19 @@ int main() {
         die("connect");
     }
 
-    // multiple pipelined requests
-    std::vector<std::string> query_list;
-    query_list.push_back("hello1");
-    query_list.push_back("hello2");
-    query_list.push_back("hello3");
-    query_list.push_back(std::string(k_max_msg, 'z'));
-    query_list.push_back("hello5");
-    for (int i=0;i<query_list.size();i++) {
-        std::string s = query_list[i];
-        // fprintf(stderr, "%s\n", s.data());
-        int32_t err = send_req(fd, (uint8_t *)s.data(), s.size());
-        if (err) {
-            fprintf(stderr, "Error: %d\n", err);
-            goto L_DONE;
-        }
-    }
-    for (size_t i = 0; i < query_list.size(); ++i) {
-        int32_t err = read_res(fd);
-        if (err) {
-            printf("Error: %d\n", err);
-            goto L_DONE;
-        }
+    std::vector<std::string> cmd;
+    for(int i=1;i<argc;i++){
+        cmd.push_back(argv[i]);
     }
 
+    int32_t err = send_req(fd, cmd);
+    if(err)
+        goto L_DONE;
+
+    err = read_res(fd);
+    if(err)
+        goto L_DONE;
+    
 L_DONE:
     close(fd);
     return 0;

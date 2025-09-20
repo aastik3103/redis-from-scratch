@@ -14,8 +14,13 @@
 #include <netinet/ip.h>
 // C++
 #include <vector>
+#include <map>
+#include <string>
 
-const size_t k_max_msg = 32 << 20;
+const size_t k_max_msg = 4096;
+const size_t k_max_args = 200*1000;
+
+static std::map<std::string,std::string> g_data;
 
 struct Conn{
     int fd = -1;
@@ -109,6 +114,92 @@ static void handle_write(Conn *conn){
     }
 }
 
+static bool read_u32(uint8_t *&curr, uint8_t *end, uint32_t &out){
+    if(curr+4 > end)
+        return false;
+
+    memcpy(&out, curr, 4);
+    curr += 4;
+    return true;
+}   
+
+static bool read_str(uint8_t *&curr, uint8_t *end, size_t n, std::string &out){
+    if(curr+n > end)
+        return false;
+
+    out.assign(curr, curr+n);
+    curr += n;
+    return true;
+}
+
+static int32_t parse_request(uint8_t *data, size_t n, std::vector<std::string> &out){
+    uint8_t *end = data + n;
+
+    uint32_t nstr = 0;
+    if(!read_u32(data, end, nstr))
+        return -1;
+
+    if(nstr>k_max_args){
+        return -1;
+    }
+
+    while(out.size()<nstr){
+        uint32_t len = 0;
+        if(!read_u32(data, end, len))
+            return -1;
+
+        out.push_back(std::string());
+
+        if(!read_str(data, end, len, out.back())){
+            return -1;
+        }
+    }
+
+    if(data!=end) 
+        return -1; // trailing garbage
+
+    return 0;
+}
+
+enum {
+    RES_OK = 0,
+    RES_ERR = 1,
+    RES_NX = 2,
+};
+
+struct Response{
+    uint32_t status = 0;
+    std::vector<uint8_t> data;
+};
+
+static void do_request(std::vector<std::string> &cmd, Response &out){
+    if(cmd.size()==2 && cmd[0]=="get"){
+        auto it = g_data.find(cmd[1]);
+        if(it == g_data.end()){
+            out.status = RES_NX;
+            return;
+        }
+
+        std::string &val = it->second;
+        out.data.assign(val.begin(), val.end());
+    }
+    else if(cmd.size()==3 && cmd[0]=="set"){
+        g_data[cmd[1]].swap(cmd[2]);
+    }
+    else if(cmd.size()==2 && cmd[0]=="del"){
+        g_data.erase(cmd[1]);
+    }
+    else
+        out.status = RES_ERR; //unrecognised command
+}
+
+static void make_response(Response &resp, std::vector<uint8_t> &out){
+    uint32_t resp_len = 4 + resp.data.size();
+    buf_append(out, (uint8_t *)&resp_len, 4);
+    buf_append(out, (uint8_t *)&resp.status, 4);
+    buf_append(out, resp.data.data(), resp.data.size());
+}
+
 static bool try_one_request(Conn * conn){
     if(conn->incoming.size()<4){
         return false;
@@ -127,11 +218,19 @@ static bool try_one_request(Conn * conn){
         return false;
 
     uint8_t *request = &conn->incoming[4];
-    printf("client says: len:%d data:%.*s\n",
-            len, len<100 ? len : 100, request);
+    // printf("client says: len:%d data:%.*s\n",
+    //         len, len<100 ? len : 100, request);
 
-    buf_append(conn->outgoing, (uint8_t *)&len, 4);
-    buf_append(conn->outgoing, request, len);
+    std::vector<std::string> cmd;
+    if(parse_request(request, len, cmd)<0){
+        msg("bad request");
+        conn->want_close = true;
+        return false;
+    }
+
+    Response resp;
+    do_request(cmd, resp);
+    make_response(resp, conn->outgoing);
 
     buf_consume(conn->incoming, 4+len);
 
