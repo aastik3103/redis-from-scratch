@@ -16,11 +16,14 @@
 #include <vector>
 #include <map>
 #include <string>
+// Project
+#include "hashtable.h"
 
 const size_t k_max_msg = 4096;
 const size_t k_max_args = 200*1000;
 
-static std::map<std::string,std::string> g_data;
+#define container_of(ptr, T, member) \
+    ((T *)((char *)ptr - offsetof(T, member)))
 
 struct Conn{
     int fd = -1;
@@ -172,22 +175,86 @@ struct Response{
     std::vector<uint8_t> data;
 };
 
+static struct{
+    HMap db; // Top level hash table
+} g_data;
+
+struct Entry{
+    struct HNode node;
+    std::string key;
+    std::string value;
+};
+
+static bool entry_eq(HNode *lhs, HNode *rhs){
+    struct Entry *le = container_of(lhs, struct Entry, node);
+    struct Entry *re = container_of(rhs, struct Entry, node);
+    return le->key == re->key;
+}
+
+// FNV Hash
+static uint64_t str_hash(uint8_t *data, size_t len){
+    uint32_t h = 0x811C9DC5;
+    for(int i=0;i<len;i++){
+        h = (h+data[i])*0x01000193;
+    }
+    return h;
+}
+
+static void do_get(std::vector<std::string> &cmd, Response &out){
+    Entry search_entry;
+    search_entry.key.swap(cmd[1]);
+    search_entry.node.h_code = str_hash((uint8_t *)search_entry.key.data(), search_entry.key.size());
+
+    HNode *node = hm_lookup(&g_data.db, &search_entry.node, &entry_eq);
+    if(!node){
+        out.status = RES_NX;
+        return;
+    }
+
+    std::string &val = container_of(node, Entry, node)->value;
+    assert(val.size()<=k_max_msg);
+    out.data.assign(val.begin(), val.end());
+}
+
+static void do_set(std::vector<std::string> &cmd){
+    Entry search_entry;
+    search_entry.key.swap(cmd[1]);
+    search_entry.node.h_code = str_hash((uint8_t *)search_entry.key.data(), search_entry.key.size());
+
+    HNode *node = hm_lookup(&g_data.db, &search_entry.node, &entry_eq);
+    if(node){
+        container_of(node, Entry, node)->value.swap(cmd[2]);
+    }
+    else{
+        Entry *en = new Entry();
+        en->key.swap(search_entry.key);
+        en->value.swap(cmd[2]);
+        en->node.h_code = search_entry.node.h_code;
+        hm_insert(&g_data.db, &en->node);
+    }
+
+}
+
+static void do_del(std::vector<std::string> &cmd){
+    Entry search_entry;
+    search_entry.key.swap(cmd[1]);
+    search_entry.node.h_code = str_hash((uint8_t *)search_entry.key.data(), search_entry.key.size());
+
+    HNode *node = hm_delete(&g_data.db, &search_entry.node, &entry_eq);
+    if(node){
+        delete container_of(node, Entry, node);
+    }
+}
+
 static void do_request(std::vector<std::string> &cmd, Response &out){
     if(cmd.size()==2 && cmd[0]=="get"){
-        auto it = g_data.find(cmd[1]);
-        if(it == g_data.end()){
-            out.status = RES_NX;
-            return;
-        }
-
-        std::string &val = it->second;
-        out.data.assign(val.begin(), val.end());
+        return do_get(cmd, out);
     }
     else if(cmd.size()==3 && cmd[0]=="set"){
-        g_data[cmd[1]].swap(cmd[2]);
+        return do_set(cmd);
     }
     else if(cmd.size()==2 && cmd[0]=="del"){
-        g_data.erase(cmd[1]);
+        return do_del(cmd);
     }
     else
         out.status = RES_ERR; //unrecognised command
