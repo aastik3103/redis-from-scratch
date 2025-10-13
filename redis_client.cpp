@@ -85,6 +85,110 @@ static int32_t send_req(int fd, std::vector<std::string> &cmd) {
     return write_all(fd, wbuf, len+4);
 }
 
+enum {
+    TAG_NIL = 0,    // nil
+    TAG_ERR = 1,    // error code + msg
+    TAG_STR = 2,    // string
+    TAG_INT = 3,    // int64
+    TAG_DBL = 4,    // double
+    TAG_ARR = 5,    // array
+};
+
+static int32_t print_response(uint8_t *data, size_t size){
+    if(size<1){
+        msg("bad response");
+        return -1;
+    }
+    
+    switch(data[0]){
+        case TAG_NIL:
+            printf("(nil)\n");
+            return 1;
+        
+        case TAG_ERR:
+            if(size < 1+8){
+                msg("bad response");
+                return -1;
+            }
+            {
+                int32_t code = 0;
+                uint32_t len = 0;
+                memcpy(&code, &data[1], 4);
+                memcpy(&len, &data[1+4], 4);
+                if(size < 1 + 8 + len){
+                    msg("bad response");
+                    return -1;
+                }
+                
+                printf("(err) [%d] %.*s\n", code, len, &data[1+8]);
+                return 1 + 8 + len;
+            }
+            
+        case TAG_INT:
+            if(size < 1 + 8){
+                msg("bad response");
+                return -1;
+            }
+            {
+                int64_t val = 0;
+                memcpy(&val, &data[1], 8);
+                printf("(int) %ld\n", val);
+                return 1 + 8;
+            }
+        case TAG_DBL:
+            if(size < 1 + 8){
+                msg("bad response");
+                return -1;
+            }
+            {
+                double val = 0;
+                memcpy(&val, &data[1], 8);
+                printf("(dbl) %g\n", val);
+                return 1 + 8;
+            }
+        case TAG_STR:
+            if(size < 1 + 4){
+                msg("bad response");
+                return -1;
+            }
+            {
+                uint32_t len = 0;
+                memcpy(&len, &data[1], 4);
+                if(size < 1 + 4 + len){
+                    msg("bad response");
+                    return -1;
+                }
+                
+                printf("(str) %.*s\n", len, &data[1 + 4]);
+                return 1 + 4 + len;
+            }
+        case TAG_ARR:
+            if(size < 1 + 4){
+                msg("bad response");
+                return -1;
+            }
+            {
+                uint32_t len = 0;
+                memcpy(&len, &data[1], 4);
+                printf("(arr) len=%u\n", len);
+                size_t arr_bytes = 1 + 4;
+                for(uint32_t i=0; i<len; i++){
+                    int32_t rv = print_response(&data[arr_bytes], size-arr_bytes);
+                    if(rv<0){
+                        return rv;
+                    }
+                    arr_bytes += (size_t)rv;
+                }
+                
+                printf("(arr) end\n");
+                return arr_bytes;
+            }
+        default:
+            msg("bad response");
+            return -1;
+    }
+}
+
 static int32_t read_res(int fd) {
     uint8_t rbuf[4+k_max_msg];
     errno = 0;
@@ -113,16 +217,13 @@ static int32_t read_res(int fd) {
     }
 
     // do something
-    uint32_t res_code = 0;
-    if(len<4){
+    int32_t rv = print_response((uint8_t *)&rbuf[4], len);
+    if(rv>0 and rv!=len){
         msg("bad response");
-        return -1;
+        rv = -1;
     }
 
-    memcpy(&res_code, &rbuf[4], 4);
-    fprintf(stderr, "Server says: [%u] %.*s\n", res_code, len-4, &rbuf[8]);
-
-    return 0;
+    return rv;
 }
 
 int main(int argc, char **argv) {

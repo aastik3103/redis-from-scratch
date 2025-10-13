@@ -110,3 +110,20 @@ void hm_clear(HMap *hmap){
 size_t hm_size(HMap *hmap){
     return (hmap->newer.size + hmap->older.size);
 }
+
+bool h_foreach(HTab *htab, bool (*f)(HNode *, void *), void *arg){
+    if(htab->size==0)
+        return true;
+    for(int i=0;i<=htab->mask;i++){
+        for(HNode *node = htab->tab[i]; node!=NULL; node = node->next){
+            if(!f(node, arg))
+                return false;
+        }
+    }
+
+    return true;
+}
+
+void hm_foreach(HMap *hmap, bool (*f)(HNode *, void *), void *arg){
+    h_foreach(&hmap->newer, f, arg) && h_foreach(&hmap->older, f, arg);
+}
