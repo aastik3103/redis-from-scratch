@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>     // calloc(), free()
+#include <stdio.h>
 #include "hashtable.h"
 
 const size_t k_rehashing_work = 128;
@@ -27,7 +28,8 @@ static HNode **h_lookup(HTab *htab, HNode *key, bool (*eq)(HNode *, HNode *)){
     size_t pos = key->h_code & htab->mask;
     HNode **from = &htab->tab[pos];
 
-    for(HNode *cur=*from; cur!=NULL; from=&cur->next){
+    for(HNode *cur; (cur = *from) != NULL; from = &cur->next){
+        fprintf(stderr, "in loop");
         if(key->h_code==cur->h_code && eq(key, cur))
             return from;
     }
